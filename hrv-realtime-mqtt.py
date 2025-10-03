@@ -23,13 +23,16 @@ MAX_HRV_INTERVALS = 30    # Keep the last 30 intervals for a rolling HRV calcula
 
 # --- Signal Processing Parameters ---
 SAMPLING_RATE_HZ = 12500
-LOW_CUT_HZ = 0.7
-HIGH_CUT_HZ = 8.0
+#LOW_CUT_HZ = 0.7
+#HIGH_CUT_HZ = 8.0
 
 # --- MQTT Configuration (NEW SECTION) ---
 MQTT_BROKER_HOST = "localhost" # Use 'localhost' if you have a local broker
 MQTT_BROKER_PORT = 1883
 MQTT_TOPIC = "hrv/data"
+username = "pod_0001"
+password = "pod_0001"
+
 # A unique client ID is good practice, especially if multiple devices are running
 MQTT_CLIENT_ID = f"hrv-client-{int(time.time())}"
 
@@ -50,6 +53,7 @@ def setup_mqtt_client():
     """Creates, configures, and connects the MQTT client."""
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, MQTT_CLIENT_ID)
+        client.username_pw_set(username, password)
         client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, 60)
         client.loop_start() # Starts a background thread to handle MQTT network traffic
         print(f"Successfully connected to MQTT Broker at {MQTT_BROKER_HOST}")
@@ -167,8 +171,16 @@ def main(show_plot):
                         sdnn = np.std(nn_intervals)
                         rmssd = np.sqrt(np.mean(np.diff(nn_intervals)**2))
                         
+                        # --- NEW: CALCULATE HEART RATE ---
+                        # 1. Calculate the average interval in milliseconds
+                        avg_interval_ms = np.mean(nn_intervals)
+                        # 2. Convert to beats per minute (60,000 ms in a minute)
+                        heart_rate_bpm = 60000.0 / avg_interval_ms
+                        # ---------------------------------
+                        
                         print("----------------------------------------")
                         print(f"HRV (last {len(nn_intervals)} beats):")
+                        print(f"  Heart Rate: {heart_rate_bpm:.2f} BPM")
                         print(f"  SDNN:  {sdnn:.2f} ms")
                         print(f"  RMSSD: {rmssd:.2f} ms")
                         print("----------------------------------------")
@@ -176,6 +188,7 @@ def main(show_plot):
                         # --- MQTT Publish (NEW) ---
                         if mqtt_client:
                             payload = {
+                                "heart_rate": round(heart_rate_bpm, 2),
                                 "sdnn": round(sdnn, 2),
                                 "rmssd": round(rmssd, 2),
                                 "intervals_used": len(nn_intervals),
