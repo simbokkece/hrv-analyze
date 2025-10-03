@@ -22,6 +22,16 @@ SAMPLING_RATE_HZ = 12500  # IMPORTANT: This should match the rate your sensor se
 LOW_CUT_HZ = 0.7        # Low cutoff for the bandpass filter (in Hz)
 HIGH_CUT_HZ = 8.0       # High cutoff for the bandpass filter (in Hz)
 
+def bandpass_filter(data, lowcut, highcut, fs, order=2):
+    """Applies a Butterworth bandpass filter to the data."""
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    # Use filtfilt to apply the filter without phase shift
+    y = filtfilt(b, a, data)
+    return y
+
 def initialize_serial():
     """Tries to connect to the serial port and returns the serial object."""
     try:
@@ -95,32 +105,44 @@ def main():
                 plt.pause(0.01)
                 continue
 
-            # 2. Process Signal
+            # 2. Process Signal & 3. Find Peaks
             current_signal_window = np.array(ppg_signal)
-            # nyquist = 0.5 * SAMPLING_RATE_HZ
-            # low = LOW_CUT_HZ / nyquist
-            # high = HIGH_CUT_HZ / nyquist
-            # b, a = butter(2, [low, high], btype='band')
-            # filtered_signal = filtfilt(b, a, current_signal_window)
 
-            # 3. Find Peaks
-            min_peak_distance = 8
-            min_prominence = 20
-            peaks, _ = find_peaks(current_signal_window, 
-                                  prominence=min_prominence,
-                                  width=(1, 7), 
-                                  distance=min_peak_distance)
+            # --- NEW: STEP 1 - FILTER THE SIGNAL ---
+            # We need at least a few seconds of data to filter effectively
+            if len(current_signal_window) < SAMPLING_RATE_HZ * 2:
+                continue
+            filtered_signal = bandpass_filter(current_signal_window, LOW_CUT_HZ, HIGH_CUT_HZ, SAMPLING_RATE_HZ)
+
+            # --- NEW: STEP 2 - SET DYNAMIC & PHYSIOLOGICAL PARAMETERS ---
+            # Prominence: Peak must be at least 30% of the signal's range
+            signal_range = np.max(filtered_signal) - np.min(filtered_signal)
+            dynamic_prominence = 0.3 * signal_range
+
+            # Distance: Set a minimum distance based on a max possible heart rate (e.g., 220 BPM)
+            # 60 seconds / 220 BPM = 0.27 seconds between beats
+            # 0.27 seconds * 100 samples/sec = 27 samples
+            min_distance_samples = (60.0 / 220.0) * SAMPLING_RATE_HZ
+
+            # --- NEW: STEP 3 - FIND PEAKS ON THE FILTERED SIGNAL ---
+            peaks, _ = find_peaks(
+                filtered_signal,
+                prominence=dynamic_prominence,
+                distance=min_distance_samples,
+                width=(5, 50) # Width in samples (500ms max width)
+            )
 
             # 4. Update Plot
             # relative_time_s = (np.array(timestamps_ms) - timestamps_ms[0]) / 1000.0
             plot_time_s = (np.array(timestamps_ms) - start_time_ms) / 1000.0
             
             # MODIFICATION: Set data for both raw and filtered lines
-            line_raw.set_data(plot_time_s, current_signal_window)
-            # line_filtered.set_data(plot_time_s, filtered_signal)
+            # line_raw.set_data(plot_time_s, current_signal_window)
+            line_raw.set_data(plot_time_s, filtered_signal)
             
             if len(peaks) > 0:
-                peaks_plot.set_data(plot_time_s[peaks], current_signal_window[peaks])
+                # peaks_plot.set_data(plot_time_s[peaks], current_signal_window[peaks])
+                peaks_plot.set_data(plot_time_s[peaks], filtered_signal[peaks])
             else:
                 peaks_plot.set_data([], [])
 
