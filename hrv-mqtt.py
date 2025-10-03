@@ -167,11 +167,13 @@ def main(port, show_plot):
 
                         if mqtt_client:
                             payload = {
-                                "heart_rate": round(heart_rate_bpm, 2),
+                                "id": 810,
+                                "ts": int(time.time()),
+                                "bpm": round(heart_rate_bpm, 2),
+                                "hrv": round(rmssd, 2),
                                 "sdnn": round(sdnn, 2),
                                 "rmssd": round(rmssd, 2),
-                                "intervals_used": len(nn_intervals),
-                                "timestamp_utc": int(time.time())
+                                "intervals_used": len(nn_intervals)
                             }
                             json_payload = json.dumps(payload)
                             result = mqtt_client.publish(MQTT_TOPIC, json_payload)
