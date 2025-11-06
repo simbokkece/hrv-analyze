@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  hrv-mqtt-data:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hrv-mqtt-data
+    hostname: hrv-mqtt-data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/app
+
+    networks:
+      - hrv-mqtt-data-network
+
+    restart: unless-stopped
+
+networks:
+  hrv-mqtt-data-network:
+    driver: bridge

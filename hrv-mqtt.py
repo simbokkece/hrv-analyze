@@ -5,6 +5,7 @@ from collections import deque
 import time
 import json
 import argparse # Used for command-line arguments
+import threading
 
 # --- For MQTT ---
 import paho.mqtt.client as mqtt
@@ -25,9 +26,10 @@ MAX_HRV_INTERVALS = 30
 SAMPLING_RATE_HZ = 12500
 
 # --- MQTT Configuration ---
-MQTT_BROKER_HOST = "localhost"
+MQTT_BROKER_HOST = "host.docker.internal"
 MQTT_BROKER_PORT = 1883
 MQTT_TOPIC = "hrv/data"
+MQTT_SUBSCRIBE_TOPIC = "mod_server/811/cmd"
 username = "pod_0001"
 password = "pod_0001"
 MQTT_CLIENT_ID = f"hrv-client-{int(time.time())}"
@@ -60,6 +62,145 @@ def setup_mqtt_client():
         print(f"Details: {e}")
         return None
 
+# def serial_write_thread(ser, running_event):
+#     """
+#     Waits for user input in a separate thread and sends commands to the serial port.
+#     """
+#     print("\n--- Serial Write Thread Started ---")
+#     print("Type 's' and press Enter to send the command.")
+    
+#     while running_event.is_set():
+#         try:
+#             # This input() call will block the *write thread*
+#             # without stopping the main loop.
+#             command_key = input() 
+            
+#             if not running_event.is_set():
+#                 break
+
+#             if command_key.lower() == 's':
+#                 # --- This is your command ---
+#                 command_payload = '${"id":811,"cmd":81101,"val":1};'
+#                 # --- --- --- --- --- --- ---
+
+#                 # Convert to a JSON string
+#                 # command_json = json.dumps(command_payload)
+                
+#                 # Add a newline, as most serial devices expect it
+#                 # command_to_send = command_json + '\n' 
+                
+#                 # Encode to bytes and send
+#                 ser.write(command_payload.encode('utf-8'))
+                
+#                 print(f"--> [SENT]: {command_payload}")
+#             elif command_key.lower() == 'o':
+#                 # --- This is your command ---
+#                 command_payload = '${"id":811,"cmd":81101,"val":0};'
+#                 # --- --- --- --- --- --- ---
+
+#                 # Convert to a JSON string
+#                 # command_json = json.dumps(command_payload)
+                
+#                 # Add a newline, as most serial devices expect it
+#                 # command_to_send = command_json + '\n' 
+                
+#                 # Encode to bytes and send
+#                 ser.write(command_payload.encode('utf-8'))
+                
+#                 print(f"--> [SENT]: {command_payload}")
+#             else:
+                
+#                 print(f"(Type 's' and Enter to send command. You typed: '{command_key}')")
+                
+#         except EOFError:
+#             # This can happen when the main program is closing
+#             break
+#         except Exception as e:
+#             if running_event.is_set():
+#                 print(f"Error in write thread: {e}")
+#             break
+#     print("--- Serial Write Thread Stopping ---")
+
+
+# MODIFIED FUNCTION: Listens to MQTT for commands and writes to serial
+def serial_write_thread(ser, mqtt_client, running_event):
+    """
+    Subscribes to an MQTT topic and sends specific commands to the serial port.
+    This function runs in a separate thread.
+    """
+    print("\n--- Serial Write Thread Started ---")
+    
+    # --- Define the MQTT On-Message Callback ---
+    # This function will be called by the Paho client's loop
+    # when a message arrives on a subscribed topic.
+    def on_message_callback(client, userdata, msg):
+        """Processes incoming MQTT messages."""
+        if not running_event.is_set():
+            return # Main program is shutting down
+
+        try:
+            # 1. Get the raw message payload as a string
+            line_data = msg.payload.decode('utf-8').strip()
+            
+            # 2. Try to parse it as JSON
+            data = json.loads(line_data)
+
+            # 3. Check if it's one of the specific commands you want
+            if data == {"id": 811, "cmd": 81101, "val": 0} or \
+               data == {"id": 811, "cmd": 81101, "val": 1}:
+                
+                # 4. Format the command (using the original string)
+                # Encapsulate with $ and ; and add a newline
+                command_to_send = f"${line_data};\n" 
+                
+                # 5. Send over serial
+                if ser and ser.is_open:
+                    ser.write(command_to_send.encode('utf-8'))
+                    print(f"--> [MQTT->SERIAL]: Sent command: {line_data}")
+                else:
+                    print("--> [MQTT->SERIAL]: Serial port not open. Cannot send.")
+            
+            else:
+                # It was valid JSON, but not a command we care about
+                print(f"--> [MQTT RX]: (Skipped) {line_data}")
+                
+        except json.JSONDecodeError:
+            # Not valid JSON
+            print(f"--> [MQTT RX]: (Invalid JSON received) {msg.payload.decode('utf-8')}")
+        except Exception as e:
+            print(f"Error in on_message_callback: {e}")
+
+    # --- End of Callback Definition ---
+
+    if not mqtt_client:
+        print("Write thread has no MQTT client. Stopping.")
+        return
+
+    try:
+        # 1. Attach the callback function to the client
+        # This tells Paho "call on_message_callback whenever a message comes in"
+        mqtt_client.on_message = on_message_callback
+        
+        # 2. Subscribe to the command topic
+        result, mid = mqtt_client.subscribe(MQTT_SUBSCRIBE_TOPIC)
+        if result == mqtt.MQTT_ERR_SUCCESS:
+            print(f"Successfully subscribed to MQTT topic '{MQTT_SUBSCRIBE_TOPIC}'")
+        else:
+            print(f"Failed to subscribe to '{MQTT_SUBSCRIBE_TOPIC}'. Error: {result}")
+
+        # 3. Wait for the main loop to signal shutdown
+        # The Paho loop (client.loop_start()) is already running in its own
+        # background thread. This thread just needs to stay alive to
+        # keep the 'on_message_callback' in scope and wait for the end.
+        running_event.wait() # This blocks until running_event.clear() is called
+    
+    except Exception as e:
+        if running_event.is_set():
+            print(f"Error in write thread: {e}")
+    
+    print("--- Serial Write Thread Stopping ---")
+
+
 # MODIFIED FUNCTION: Now accepts 'port' as an argument
 def main(port, show_plot):
     """Main function to run the real-time HRV monitoring loop."""
@@ -70,7 +211,19 @@ def main(port, show_plot):
 
     mqtt_client = setup_mqtt_client()
     if not mqtt_client:
-        print("Continuing without MQTT.")
+        print("Continuing without MQTT (but command-listener thread will not work).")
+
+    # --- Threading Setup ---
+    running_event = threading.Event()
+    running_event.set() # Set the event, similar to running = True
+
+    # Start the write thread
+    write_thread = threading.Thread(
+        target=serial_write_thread, 
+        args=(ser, mqtt_client, running_event)
+    )
+    write_thread.start()
+    # --- End Threading Setup ---
 
     max_len_data = int(200)
     timestamps_ms = deque(maxlen=max_len_data)
@@ -95,18 +248,33 @@ def main(port, show_plot):
     print(f"Plotting enabled: {show_plot}")
     print("Waiting for data... Ensure your device is sending data in 'signal:value' format.")
     
-    running = True
+    # running = True
     try:
-        while running:
+        while running_event.is_set():
             if show_plot and not plt.fignum_exists(fig.number):
-                running = False
+                running_event.clear() # <-- MODIFIED
                 continue
 
             if ser.in_waiting > 0:
                 try:
                     line_data = ser.readline().decode('utf-8').strip()
-                    if ':' in line_data:
-                        signal_value = float(line_data.split(':')[1])
+                    data = json.loads(line_data)
+
+                    # if ':' in line_data:
+                    #     signal_value = float(line_data.split(':')[1])
+                    #     current_time = int(time.time() * 1000)
+
+                    #     if start_time_ms is None:
+                    #         start_time_ms = current_time
+
+                    #     timestamps_ms.append(current_time)
+                    #     ppg_signal.append(signal_value)
+                
+                    if "signal" in data:
+                        # Ensure the value is a float (or can be converted)
+                        signal_value = float(data["signal"])
+                        # print(signal_value) 
+                        
                         current_time = int(time.time() * 1000)
 
                         if start_time_ms is None:
@@ -114,7 +282,8 @@ def main(port, show_plot):
 
                         timestamps_ms.append(current_time)
                         ppg_signal.append(signal_value)
-                except (ValueError, IndexError, UnicodeDecodeError):
+
+                except (json.JSONDecodeError, ValueError, IndexError, UnicodeDecodeError, KeyError):
                     continue
             
             if len(ppg_signal) < 50:
@@ -167,7 +336,7 @@ def main(port, show_plot):
 
                         if mqtt_client:
                             payload = {
-                                "id": 810,
+                                "id": 811,
                                 "ts": int(time.time()),
                                 "bpm": round(heart_rate_bpm, 2),
                                 "hrv": round(rmssd, 2),
@@ -187,11 +356,20 @@ def main(port, show_plot):
 
     except KeyboardInterrupt:
         print("\n--- Monitoring stopped by user ---")
+        running_event.clear() # <-- MODIFIED: Signal threads to stop
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
+        running_event.clear() # <-- MODIFIED: Signal threads to stop
     finally:
         if show_plot:
             plt.ioff()
+        
+        # --- Wait for write thread to finish ---
+        print("Waiting for write thread to close...")
+        write_thread.join(timeout=2.0) # Wait for the thread to exit
+        print("Write thread closed.")
+        # --- --- --- --- --- --- --- --- --- ---
+
         if ser and ser.is_open:
             ser.close()
             print("Serial port closed.")
