@@ -6,6 +6,7 @@ import time
 import json
 import argparse # Used for command-line arguments
 import threading
+import os
 
 # --- For MQTT ---
 import paho.mqtt.client as mqtt
@@ -33,6 +34,80 @@ MQTT_SUBSCRIBE_TOPIC = "mod_server/811/cmd"
 username = "pod_0001"
 password = "pod_0001"
 MQTT_CLIENT_ID = f"hrv-client-{int(time.time())}"
+
+
+# --- (Add this new function) ---
+
+def get_port_from_mqtt(broker_host, broker_port, username, password):
+    """
+    Connects to MQTT and waits for a retained message
+    on the config topic to get the serial port.
+    """
+    print("--- Connecting to MQTT to get serial port configuration ---")
+    
+    # We need a shared variable for the callback to set
+    port_config = {"port": None}
+    
+    def on_connect(client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            print(f"Successfully connected to MQTT broker at {broker_host}...")
+            # Subscribe to the config topic
+            client.subscribe(MQTT_SUBSCRIBE_TOPIC.replace("command", "mod_server/811/port"))
+        else:
+            print(f"Failed to connect to MQTT: {rc}")
+
+    def on_message(client, userdata, msg):
+        """Called when the port message is received."""
+        try:
+            port = msg.payload.decode('utf-8').strip()
+            if port.startswith('/dev/tty') or port.startswith('COM'):
+                print(f"--- Received serial port: {port} ---")
+                port_config["port"] = port
+                # We got what we needed, stop the client's loop
+                client.loop_stop()
+            else:
+                print(f"Received non-serial-port message: {port}")
+        except Exception as e:
+            print(f"Error processing config message: {e}")
+
+    # Use a unique client ID for this one-time task
+    config_client_id = f"hrv-config-fetcher-{int(time.time())}"
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, config_client_id)
+    client.username_pw_set(username, password)
+    
+    # Assign the callbacks
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    try:
+        client.connect(broker_host, broker_port, 60)
+        # client.loop_forever() blocks, so we use loop_start()
+        # and a manual wait loop.
+        
+        # But wait! If the message is retained, on_message
+        # will be called *before* loop_start() even returns.
+        # A safer pattern is loop_start() and a wait.
+        
+        client.loop_start()
+        
+        print("Waiting for serial port configuration from MQTT...")
+        timeout_start = time.time()
+        while port_config["port"] is None:
+            time.sleep(0.1)
+            # Timeout after 30 seconds
+            if time.time() - timeout_start > 30:
+                print("Error: Timed out waiting for port configuration.")
+                client.loop_stop()
+                return None
+        
+        # We got the port, loop was stopped by on_message
+        return port_config["port"]
+
+    except Exception as e:
+        print(f"Error connecting to MQTT for config: {e}")
+        if client.is_connected():
+            client.loop_stop()
+        return None
 
 # MODIFIED FUNCTION: Now accepts 'port' as an argument
 def initialize_serial(port):
@@ -383,13 +458,27 @@ def main(port, show_plot):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Real-time HRV monitoring from a serial device with MQTT publishing.")
     
-    # NEW ARGUMENT: For specifying the serial port
-    parser.add_argument("--port", type=str, required=True,
-                        help="The serial port to connect to (e.g., /dev/ttyUSB0 or COM3).")
+    # # NEW ARGUMENT: For specifying the serial port
+    # parser.add_argument("--port", type=str, required=True,
+    #                     help="The serial port to connect to (e.g., /dev/ttyUSB0 or COM3).")
     
     parser.add_argument("--no-plot", action="store_false", dest="show_plot",
                         help="Run the script in headless mode without displaying the plot.")
     args = parser.parse_args()
 
-    # MODIFIED CALL: Pass the 'port' argument to the main function
-    main(port=args.port, show_plot=args.show_plot)
+    serial_port = get_port_from_mqtt(
+        broker_host=MQTT_BROKER_HOST,
+        broker_port=MQTT_BROKER_PORT,
+        username=username,
+        password=password
+    )
+
+    if serial_port:
+        # MODIFIED CALL: Pass the port received from MQTT
+        print(f"Starting main application with port {serial_port}")
+        main(port=serial_port, show_plot=args.show_plot)
+    else:
+        print("Error: Could not determine serial port. Exiting.")
+
+    # # MODIFIED CALL: Pass the 'port' argument to the main function
+    # main(port=args.port, show_plot=args.show_plot)
