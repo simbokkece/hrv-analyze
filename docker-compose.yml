@@ -7,16 +7,19 @@ services:
       dockerfile: Dockerfile
     container_name: hrv-mqtt-data
     hostname: hrv-mqtt-data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
 
-    networks:
-      - hrv-mqtt-data-network
+    network_mode: host  # Use the host's network stack directly
+    privileged: true
 
     restart: unless-stopped
 
-networks:
-  hrv-mqtt-data-network:
-    driver: bridge
+    # This passes the "--no-plot" argument to the script
+    # command: ["python", "hrv-mqtt.py", "--no-plot"]
+
+# networks:
+#   hrv-mqtt-data-network:
+#     driver: bridge

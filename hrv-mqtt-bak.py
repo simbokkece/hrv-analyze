@@ -11,16 +11,14 @@ import os
 # --- For MQTT ---
 import paho.mqtt.client as mqtt
 
-# --- Plotting Imports (Loaded conditionally later) ---
-plt = None
-# import matplotlib
-# matplotlib.use('TkAgg')
-# import matplotlib.pyplot as plt
-# --- End Plotting Imports ---
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
 
 # --- Configuration ---
 # User-configurable settings
-BAUD_RATE = 230400
+# SERIAL_PORT = '/dev/ttyUSB7' # <-- THIS LINE IS REMOVED
+BAUD_RATE = 460800
 DATA_WINDOW_SECONDS = 10
 MIN_HRV_INTERVALS = 10
 MAX_HRV_INTERVALS = 30
@@ -37,6 +35,9 @@ username = "pod_0001"
 password = "pod_0001"
 MQTT_CLIENT_ID = f"hrv-client-{int(time.time())}"
 
+
+# --- (Add this new function) ---
+
 def get_port_from_mqtt(broker_host, broker_port, username, password):
     """
     Connects to MQTT and waits for a retained message
@@ -44,13 +45,14 @@ def get_port_from_mqtt(broker_host, broker_port, username, password):
     """
     print("--- Connecting to MQTT to get serial port configuration ---")
     
+    # We need a shared variable for the callback to set
     port_config = {"port": None}
     
     def on_connect(client, userdata, flags, rc, properties=None):
         if rc == 0:
             print(f"Successfully connected to MQTT broker at {broker_host}...")
             # Subscribe to the config topic
-            client.subscribe("mod_server/811/port") # Fixed topic
+            client.subscribe("mod_server/811/port")
         else:
             print(f"Failed to connect to MQTT: {rc}")
 
@@ -61,32 +63,44 @@ def get_port_from_mqtt(broker_host, broker_port, username, password):
             if port.startswith('/dev/tty') or port.startswith('COM'):
                 print(f"--- Received serial port: {port} ---")
                 port_config["port"] = port
+                # We got what we needed, stop the client's loop
                 client.loop_stop()
             else:
                 print(f"Received non-serial-port message: {port}")
         except Exception as e:
             print(f"Error processing config message: {e}")
 
+    # Use a unique client ID for this one-time task
     config_client_id = f"hrv-config-fetcher-{int(time.time())}"
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, config_client_id)
     client.username_pw_set(username, password)
     
+    # Assign the callbacks
     client.on_connect = on_connect
     client.on_message = on_message
 
     try:
         client.connect(broker_host, broker_port, 60)
+        # client.loop_forever() blocks, so we use loop_start()
+        # and a manual wait loop.
+        
+        # But wait! If the message is retained, on_message
+        # will be called *before* loop_start() even returns.
+        # A safer pattern is loop_start() and a wait.
+        
         client.loop_start()
         
         print("Waiting for serial port configuration from MQTT...")
         timeout_start = time.time()
         while port_config["port"] is None:
             time.sleep(0.1)
+            # Timeout after 30 seconds
             if time.time() - timeout_start > 30:
                 print("Error: Timed out waiting for port configuration.")
                 client.loop_stop()
                 return None
         
+        # We got the port, loop was stopped by on_message
         return port_config["port"]
 
     except Exception as e:
@@ -95,6 +109,7 @@ def get_port_from_mqtt(broker_host, broker_port, username, password):
             client.loop_stop()
         return None
 
+# MODIFIED FUNCTION: Now accepts 'port' as an argument
 def initialize_serial(port):
     """Tries to connect to the specified serial port and returns the serial object."""
     try:
@@ -107,6 +122,7 @@ def initialize_serial(port):
         print(f"Details: {e}")
         return None
 
+# --- MQTT Setup Function ---
 def setup_mqtt_client():
     """Creates, configures, and connects the MQTT client."""
     try:
@@ -121,6 +137,67 @@ def setup_mqtt_client():
         print(f"Details: {e}")
         return None
 
+# def serial_write_thread(ser, running_event):
+#     """
+#     Waits for user input in a separate thread and sends commands to the serial port.
+#     """
+#     print("\n--- Serial Write Thread Started ---")
+#     print("Type 's' and press Enter to send the command.")
+    
+#     while running_event.is_set():
+#         try:
+#             # This input() call will block the *write thread*
+#             # without stopping the main loop.
+#             command_key = input() 
+            
+#             if not running_event.is_set():
+#                 break
+
+#             if command_key.lower() == 's':
+#                 # --- This is your command ---
+#                 command_payload = '${"id":811,"cmd":81101,"val":1};'
+#                 # --- --- --- --- --- --- ---
+
+#                 # Convert to a JSON string
+#                 # command_json = json.dumps(command_payload)
+                
+#                 # Add a newline, as most serial devices expect it
+#                 # command_to_send = command_json + '\n' 
+                
+#                 # Encode to bytes and send
+#                 ser.write(command_payload.encode('utf-8'))
+                
+#                 print(f"--> [SENT]: {command_payload}")
+#             elif command_key.lower() == 'o':
+#                 # --- This is your command ---
+#                 command_payload = '${"id":811,"cmd":81101,"val":0};'
+#                 # --- --- --- --- --- --- ---
+
+#                 # Convert to a JSON string
+#                 # command_json = json.dumps(command_payload)
+                
+#                 # Add a newline, as most serial devices expect it
+#                 # command_to_send = command_json + '\n' 
+                
+#                 # Encode to bytes and send
+#                 ser.write(command_payload.encode('utf-8'))
+                
+#                 print(f"--> [SENT]: {command_payload}")
+#             else:
+                
+#                 print(f"(Type 's' and Enter to send command. You typed: '{command_key}')")
+                
+#         except EOFError:
+#             # This can happen when the main program is closing
+#             break
+#         except Exception as e:
+#             if running_event.is_set():
+#                 print(f"Error in write thread: {e}")
+#             break
+#     print("--- Serial Write Thread Stopping ---")
+
+
+# MODIFIED FUNCTION: Listens to MQTT for commands and writes to serial
 def serial_write_thread(ser, mqtt_client, running_event):
     """
     Subscribes to an MQTT topic and sends specific commands to the serial port.
@@ -128,20 +205,30 @@ def serial_write_thread(ser, mqtt_client, running_event):
     """
     print("\n--- Serial Write Thread Started ---")
     
+    # --- Define the MQTT On-Message Callback ---
+    # This function will be called by the Paho client's loop
+    # when a message arrives on a subscribed topic.
     def on_message_callback(client, userdata, msg):
         """Processes incoming MQTT messages."""
         if not running_event.is_set():
-            return 
+            return # Main program is shutting down
 
         try:
+            # 1. Get the raw message payload as a string
             line_data = msg.payload.decode('utf-8').strip()
+            
+            # 2. Try to parse it as JSON
             data = json.loads(line_data)
 
+            # 3. Check if it's one of the specific commands you want
             if data == {"id": 811, "cmd": 81101, "val": 0} or \
                data == {"id": 811, "cmd": 81101, "val": 1}:
                 
+                # 4. Format the command (using the original string)
+                # Encapsulate with $ and ; and add a newline
                 command_to_send = f"${line_data};\n" 
                 
+                # 5. Send over serial
                 if ser and ser.is_open:
                     ser.write(command_to_send.encode('utf-8'))
                     print(f"--> [MQTT->SERIAL]: Sent command: {line_data}")
@@ -149,27 +236,38 @@ def serial_write_thread(ser, mqtt_client, running_event):
                     print("--> [MQTT->SERIAL]: Serial port not open. Cannot send.")
             
             else:
+                # It was valid JSON, but not a command we care about
                 print(f"--> [MQTT RX]: (Skipped) {line_data}")
                 
         except json.JSONDecodeError:
+            # Not valid JSON
             print(f"--> [MQTT RX]: (Invalid JSON received) {msg.payload.decode('utf-8')}")
         except Exception as e:
             print(f"Error in on_message_callback: {e}")
+
+    # --- End of Callback Definition ---
 
     if not mqtt_client:
         print("Write thread has no MQTT client. Stopping.")
         return
 
     try:
+        # 1. Attach the callback function to the client
+        # This tells Paho "call on_message_callback whenever a message comes in"
         mqtt_client.on_message = on_message_callback
         
+        # 2. Subscribe to the command topic
         result, mid = mqtt_client.subscribe(MQTT_SUBSCRIBE_TOPIC)
         if result == mqtt.MQTT_ERR_SUCCESS:
             print(f"Successfully subscribed to MQTT topic '{MQTT_SUBSCRIBE_TOPIC}'")
         else:
             print(f"Failed to subscribe to '{MQTT_SUBSCRIBE_TOPIC}'. Error: {result}")
 
-        running_event.wait() 
+        # 3. Wait for the main loop to signal shutdown
+        # The Paho loop (client.loop_start()) is already running in its own
+        # background thread. This thread just needs to stay alive to
+        # keep the 'on_message_callback' in scope and wait for the end.
+        running_event.wait() # This blocks until running_event.clear() is called
     
     except Exception as e:
         if running_event.is_set():
@@ -178,26 +276,10 @@ def serial_write_thread(ser, mqtt_client, running_event):
     print("--- Serial Write Thread Stopping ---")
 
 
+# MODIFIED FUNCTION: Now accepts 'port' as an argument
 def main(port, show_plot):
     """Main function to run the real-time HRV monitoring loop."""
-    
-    # --- MODIFICATION: Conditionally import plotting libraries ---
-    global plt
-    fig, ax, line_raw, peaks_plot = (None, None, None, None)
-    
-    if show_plot:
-        try:
-            import matplotlib
-            matplotlib.use('TkAgg')
-            import matplotlib.pyplot as plt
-            print("Plotting enabled.")
-        except ImportError:
-            print("Warning: matplotlib or tkinter not found. Disabling plotting.")
-            show_plot = False # Force disable
-    else:
-        print("Plotting disabled.")
-    # --- END MODIFICATION ---
-
+    # The 'port' from the command line is passed here
     ser = initialize_serial(port)
     if not ser:
         return
@@ -206,14 +288,17 @@ def main(port, show_plot):
     if not mqtt_client:
         print("Continuing without MQTT (but command-listener thread will not work).")
 
+    # --- Threading Setup ---
     running_event = threading.Event()
-    running_event.set() 
+    running_event.set() # Set the event, similar to running = True
 
+    # Start the write thread
     write_thread = threading.Thread(
         target=serial_write_thread, 
         args=(ser, mqtt_client, running_event)
     )
     write_thread.start()
+    # --- End Threading Setup ---
 
     max_len_data = int(200)
     timestamps_ms = deque(maxlen=max_len_data)
@@ -222,7 +307,7 @@ def main(port, show_plot):
     last_peak_time = None
     start_time_ms = None
 
-    # This setup is now conditional
+    fig, ax, line_raw, peaks_plot = (None, None, None, None)
     if show_plot:
         plt.ion()
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -235,23 +320,36 @@ def main(port, show_plot):
         ax.legend()
 
     print("\n--- Starting Real-Time HRV Monitoring ---")
-    print("Waiting for data... Ensure your device is sending data in '{\"signal\": value}' format.")
+    print(f"Plotting enabled: {show_plot}")
+    print("Waiting for data... Ensure your device is sending data in 'signal:value' format.")
     
+    # running = True
     try:
         while running_event.is_set():
-            if show_plot and (fig is None or not plt.fignum_exists(fig.number)):
-                # Check if fig is None or plot window was closed
-                print("Plot window closed by user or failed to create.")
-                running_event.clear() 
+            if show_plot and not plt.fignum_exists(fig.number):
+                running_event.clear() # <-- MODIFIED
                 continue
 
             if ser.in_waiting > 0:
                 try:
                     line_data = ser.readline().decode('utf-8').strip()
                     data = json.loads(line_data)
+
+                    # if ':' in line_data:
+                    #     signal_value = float(line_data.split(':')[1])
+                    #     current_time = int(time.time() * 1000)
+
+                    #     if start_time_ms is None:
+                    #         start_time_ms = current_time
+
+                    #     timestamps_ms.append(current_time)
+                    #     ppg_signal.append(signal_value)
                 
                     if "signal" in data:
+                        # Ensure the value is a float (or can be converted)
                         signal_value = float(data["signal"])
+                        # print(signal_value) 
+                        
                         current_time = int(time.time() * 1000)
 
                         if start_time_ms is None:
@@ -278,7 +376,7 @@ def main(port, show_plot):
                 else:
                     peaks_plot.set_data([], [])
 
-                latest_plot_time = plot_time_s[-1] if len(plot_time_s) > 0 else 0
+                latest_plot_time = plot_time_s[-1]
                 ax.set_xlim(latest_plot_time - DATA_WINDOW_SECONDS, latest_plot_time)
                 
                 if len(current_signal_window) > 0:
@@ -333,17 +431,19 @@ def main(port, show_plot):
 
     except KeyboardInterrupt:
         print("\n--- Monitoring stopped by user ---")
-        running_event.clear() 
+        running_event.clear() # <-- MODIFIED: Signal threads to stop
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}")
-        running_event.clear() 
+        running_event.clear() # <-- MODIFIED: Signal threads to stop
     finally:
-        if show_plot and plt:
+        if show_plot:
             plt.ioff()
         
+        # --- Wait for write thread to finish ---
         print("Waiting for write thread to close...")
-        write_thread.join(timeout=2.0) 
+        write_thread.join(timeout=2.0) # Wait for the thread to exit
         print("Write thread closed.")
+        # --- --- --- --- --- --- --- --- --- ---
 
         if ser and ser.is_open:
             ser.close()
@@ -354,12 +454,14 @@ def main(port, show_plot):
             print("MQTT client disconnected.")
         print("Script finished.")
 
+# --- Main execution block (MODIFIED for argument parsing) ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Real-time HRV monitoring from a serial device with MQTT publishing.")
     
-    # This logic is correct:
-    # Default is show_plot=True.
-    # --no-plot sets show_plot=False.
+    # # NEW ARGUMENT: For specifying the serial port
+    # parser.add_argument("--port", type=str, required=True,
+    #                     help="The serial port to connect to (e.g., /dev/ttyUSB0 or COM3).")
+    
     parser.add_argument("--no-plot", action="store_false", dest="show_plot",
                         help="Run the script in headless mode without displaying the plot.")
     args = parser.parse_args()
@@ -372,8 +474,11 @@ if __name__ == '__main__':
     )
 
     if serial_port:
+        # MODIFIED CALL: Pass the port received from MQTT
         print(f"Starting main application with port {serial_port}")
-        # Pass the argument from the command line
         main(port=serial_port, show_plot=args.show_plot)
     else:
         print("Error: Could not determine serial port. Exiting.")
+
+    # # MODIFIED CALL: Pass the 'port' argument to the main function
+    # main(port=args.port, show_plot=args.show_plot)
