@@ -27,7 +27,7 @@ MAX_HRV_INTERVALS = 30
 SAMPLING_RATE_HZ = 12500
 
 # --- MQTT Configuration ---
-MQTT_BROKER_HOST = "host.docker.internal"
+MQTT_BROKER_HOST = "localhost"
 MQTT_BROKER_PORT = 1883
 MQTT_TOPIC = "hrv/data"
 MQTT_SUBSCRIBE_TOPIC = "mod_server/811/cmd"
