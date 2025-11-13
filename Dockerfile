@@ -15,4 +15,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Run the application
-CMD ["python", "hrv-mqtt.py", "--no-plot"]
+CMD ["python", "hrv-mqtt-port.py", "--no-plot"]

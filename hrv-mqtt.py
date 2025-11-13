@@ -20,6 +20,7 @@ plt = None
 
 # --- Configuration ---
 # User-configurable settings
+SERIAL_PORT = '/dev/esp32_811'
 BAUD_RATE = 230400
 DATA_WINDOW_SECONDS = 10
 MIN_HRV_INTERVALS = 10
@@ -33,67 +34,11 @@ MQTT_BROKER_HOST = "localhost"
 MQTT_BROKER_PORT = 1883
 MQTT_TOPIC = "hrv/data"
 MQTT_SUBSCRIBE_TOPIC = "mod_server/811/cmd"
+MQTT_HEARTBEAT_TOPIC = "mod_server/811/data"
 username = "pod_0001"
 password = "pod_0001"
 MQTT_CLIENT_ID = f"hrv-client-{int(time.time())}"
 
-def get_port_from_mqtt(broker_host, broker_port, username, password):
-    """
-    Connects to MQTT and waits for a retained message
-    on the config topic to get the serial port.
-    """
-    print("--- Connecting to MQTT to get serial port configuration ---")
-    
-    port_config = {"port": None}
-    
-    def on_connect(client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            print(f"Successfully connected to MQTT broker at {broker_host}...")
-            # Subscribe to the config topic
-            client.subscribe("mod_server/811/port") # Fixed topic
-        else:
-            print(f"Failed to connect to MQTT: {rc}")
-
-    def on_message(client, userdata, msg):
-        """Called when the port message is received."""
-        try:
-            port = msg.payload.decode('utf-8').strip()
-            if port.startswith('/dev/tty') or port.startswith('COM'):
-                print(f"--- Received serial port: {port} ---")
-                port_config["port"] = port
-                client.loop_stop()
-            else:
-                print(f"Received non-serial-port message: {port}")
-        except Exception as e:
-            print(f"Error processing config message: {e}")
-
-    config_client_id = f"hrv-config-fetcher-{int(time.time())}"
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, config_client_id)
-    client.username_pw_set(username, password)
-    
-    client.on_connect = on_connect
-    client.on_message = on_message
-
-    try:
-        client.connect(broker_host, broker_port, 60)
-        client.loop_start()
-        
-        print("Waiting for serial port configuration from MQTT...")
-        timeout_start = time.time()
-        while port_config["port"] is None:
-            time.sleep(0.1)
-            if time.time() - timeout_start > 30:
-                print("Error: Timed out waiting for port configuration.")
-                client.loop_stop()
-                return None
-        
-        return port_config["port"]
-
-    except Exception as e:
-        print(f"Error connecting to MQTT for config: {e}")
-        if client.is_connected():
-            client.loop_stop()
-        return None
 
 def initialize_serial(port):
     """Tries to connect to the specified serial port and returns the serial object."""
@@ -184,7 +129,7 @@ def main(port, show_plot):
     # --- MODIFICATION: Conditionally import plotting libraries ---
     global plt
     fig, ax, line_raw, peaks_plot = (None, None, None, None)
-    
+
     if show_plot:
         try:
             import matplotlib
@@ -200,6 +145,7 @@ def main(port, show_plot):
 
     ser = initialize_serial(port)
     if not ser:
+        print("Serial port is not correct")
         return
 
     mqtt_client = setup_mqtt_client()
@@ -221,6 +167,11 @@ def main(port, show_plot):
     nn_intervals = deque(maxlen=MAX_HRV_INTERVALS)
     last_peak_time = None
     start_time_ms = None
+
+    # --- Heartbeat variables ---
+    heartbeat_count = 0
+    last_heartbeat_time = time.time()
+    # --- End Heartbeat ---
 
     # This setup is now conditional
     if show_plot:
@@ -329,6 +280,25 @@ def main(port, show_plot):
                             else:
                                 print(f"Failed to publish to MQTT. Error code: {result.rc}")
 
+            # --- Heartbeat Logic ---
+            current_loop_time = time.time()
+            if (current_loop_time - last_heartbeat_time) >= 1.0:
+                heartbeat_count += 1
+                payload = {
+                    "id": 811,
+                    "ts": int(current_loop_time),
+                    "uptime_sec": heartbeat_count
+                }
+                json_payload = json.dumps(payload)
+                
+                if mqtt_client:
+                    result = mqtt_client.publish(MQTT_HEARTBEAT_TOPIC, json_payload)
+                    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                        print(f"Failed to publish heartbeat. Error: {result.rc}")
+                
+                last_heartbeat_time = current_loop_time
+            # --- End Heartbeat Logic ---
+
             time.sleep(0.01)
 
     except KeyboardInterrupt:
@@ -354,6 +324,7 @@ def main(port, show_plot):
             print("MQTT client disconnected.")
         print("Script finished.")
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Real-time HRV monitoring from a serial device with MQTT publishing.")
     
@@ -364,16 +335,5 @@ if __name__ == '__main__':
                         help="Run the script in headless mode without displaying the plot.")
     args = parser.parse_args()
 
-    serial_port = get_port_from_mqtt(
-        broker_host=MQTT_BROKER_HOST,
-        broker_port=MQTT_BROKER_PORT,
-        username=username,
-        password=password
-    )
-
-    if serial_port:
-        print(f"Starting main application with port {serial_port}")
-        # Pass the argument from the command line
-        main(port=serial_port, show_plot=args.show_plot)
-    else:
-        print("Error: Could not determine serial port. Exiting.")
+    print(f"Starting main application with port {SERIAL_PORT}")
+    main(port=SERIAL_PORT, show_plot=args.show_plot)
